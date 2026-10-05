@@ -1,0 +1,15 @@
+change_pct  bytes_new    wall_ms    read_ms    hash_ms   write_ms      MiB_s    threads
+100         268435456      332.5       36.5      207.0     1077.0      770.0          4
+0                   0       58.2       33.2      194.3        1.4     4400.4          4
+1             2097152       58.8       35.9      183.1        5.3     4350.4          4
+5            12582912       63.2       33.4      185.8       30.1     4049.9          4
+10           26214400       77.2       37.3      185.4       80.4     3314.0          4
+25           67108864      218.9       35.2      199.5      632.6     1169.3          4
+50          134217728      307.2       34.6      193.6      992.3      833.2          4
+
+restore (full image refill from store):
+  wall_ms=952.6 read_ms=58.8 hash_ms=185.9 write_ms=3542.2 MiB_s=268.7 threads=4
+  restored image byte-identical: yes
+
+store: 487 chunk files, 488M for 7 snapshots of a 256 MiB image
+(image regenerated per row; *_ms columns for read/hash/write are summed over threads)

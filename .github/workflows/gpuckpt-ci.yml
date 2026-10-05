@@ -1,0 +1,28 @@
+name: gpuckpt-ci
+on:
+  push:
+    paths: ['gpuckpt/**', '.github/workflows/gpuckpt-ci.yml']
+  pull_request:
+    paths: ['gpuckpt/**', '.github/workflows/gpuckpt-ci.yml']
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gpuckpt
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - run: make
+      - run: make test
+      - name: sanitizers
+        run: |
+          make clean
+          make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          ASAN_OPTIONS=detect_leaks=1 bash tests/run.sh
+      - name: builtin sha256 (no openssl)
+        run: |
+          make clean
+          PKG_CONFIG=/bin/false make
+          ./build/gpuckpt version | grep -q builtin
+          make test
