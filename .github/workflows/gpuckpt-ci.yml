@@ -12,7 +12,8 @@ jobs:
         working-directory: gpuckpt
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev libcurl4-openssl-dev
+      - run: pip install botocore
       - run: make
       - run: make test
       - name: sanitizers
@@ -20,9 +21,10 @@ jobs:
           make clean
           make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
           ASAN_OPTIONS=detect_leaks=1 bash tests/run.sh
-      - name: builtin sha256 (no openssl)
+      - name: builtin sha256, no libcurl (pkg-config disabled)
         run: |
           make clean
           PKG_CONFIG=/bin/false make
           ./build/gpuckpt version | grep -q builtin
+          ./build/gpuckpt version | grep -q "s3: unavailable"
           make test

@@ -4,3 +4,4 @@ build/
 *.so
 /tmp-test/
 /bench/out/
+__pycache__/

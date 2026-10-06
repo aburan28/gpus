@@ -22,14 +22,16 @@ driver. The open hardware questions are tracked in [docs/gates.md](docs/gates.md
 
 ```sh
 make                 # build/gpuckpt, build/libgpuckpt.a, build/libcuda_mock.so
-make test            # 77 CPU-only checks (host files + mock driver)
+make test            # 106 CPU-only checks (host files, mock driver, mock S3 endpoint)
 make bench           # synthetic storage-layer benchmark
 CUDA_HOME=/usr/local/cuda make   # on a CUDA host: real header, binary reports cuda-header: real
 ```
 
 Dependencies: a C11 compiler, make, python3 and bash for tests. OpenSSL's
 libcrypto is used for SHA-256 when `pkg-config` finds it (hardware SHA
-extensions), otherwise a builtin implementation is compiled in.
+extensions), otherwise a builtin implementation is compiled in. libcurl
+(`libcurl4-openssl-dev`) enables the S3 backend; without it the binary
+builds and refuses `s3://` repositories with that reason.
 
 `gpuckpt version` prints which hash implementation and which CUDA header
 the binary was built with. A binary showing `cuda-header: mock (UNVERIFIED)`
@@ -38,7 +40,7 @@ must not be used against a real driver.
 ## Usage
 
 ```sh
-gpuckpt init --repo /ckpt/store --chunk-size 1048576
+gpuckpt init --repo /ckpt/store --chunk-size 1048576      # or --repo s3://bucket/prefix, see docs/s3.md
 
 # Checkpoint a running CUDA process and let it continue (round trip in place)
 gpuckpt snapshot --repo /ckpt/store --pid 12345 --resume --note "epoch 12"
@@ -77,18 +79,22 @@ was left in an unexpected driver state (details on stderr).
 
 ```
 include/gpuckpt.h        public API: repo, image, snapshot, manifest, cuda adapter
-src/store.c              content-addressed chunk store (write-once, link()-published)
+src/objstore.c           object layer: local directory implementation + dispatch
+src/s3.c                 S3 implementation: libcurl transport, SigV4 signing, retries
+src/store.c              content-addressed chunk store (write-once over the object layer)
 src/manifest.c           self-checked text manifests
 src/snapshot.c           chunk-parallel create / restore / verify / gc, repo locking
 src/image_file.c         host-file image backend
 src/cuda_backend.c       CUDA checkpoint adapter (dlopen'ed libcuda, custom storage)
 src/cli.c                command-line front end
 tests/run.sh             test suite
-tests/mock/              documentation-derived cuda.h and a mock libcuda
+tests/mock/              documentation-derived cuda.h, a mock libcuda, a mock S3 endpoint
+                         that verifies every request's SigV4 signature
 bench/bench.sh           storage-layer benchmark
 scripts/criu-*.sh        EXPERIMENTAL CRIU orchestration (gate 3, unverified)
 docs/design.md           data model, control flow, failure policy, build modes
 docs/gates.md            hardware questions still open, and what the code assumes
+docs/s3.md               S3 backend: configuration, write-once semantics, gc grace
 ```
 
 ## Design in brief
@@ -98,9 +104,12 @@ docs/gates.md            hardware questions still open, and what the code assume
   manifest and the chunks it names. Forgetting a snapshot never breaks
   another; `gc` reclaims exactly the unreferenced chunks.
 - **Content is identity.** Chunk files are named by SHA-256 of their bytes
-  and published with `link(2)`, so N concurrent writers of the same content
-  produce one file and one "new" count. Readers re-hash on restore and
-  verify; manifests carry a trailer hash over their own text.
+  and published write-once (`link(2)` locally, `If-None-Match: *` on S3),
+  so N concurrent writers of the same content produce one object and one
+  "new" count. Readers re-hash on restore and verify; manifests carry a
+  trailer hash over their own text.
+- **Same layout everywhere.** A local repo and an S3 repo use identical
+  keys, so one can be synced into the other and remain valid.
 - **Immutable records.** Chunk files and manifests are never rewritten.
   `init` refuses an existing repo; `snapshot --id` refuses an existing id.
 - **Never complete a failed copy.** If the copy phase fails, the driver
@@ -146,7 +155,10 @@ expectation is untested.
 
 - No run against a real driver, GPU, or CRIU install. Gates 1 to 6 in
   `docs/gates.md` are open.
-- GPUDirect Storage, remote replication, application dirty tracking,
-  retention policies beyond `forget` + `gc` (plan step 6).
+- GPUDirect Storage, application dirty tracking, retention policies beyond
+  `forget` + `gc` (plan step 6). Remote storage is covered by the S3
+  backend; replication between stores is `aws s3 sync`.
+- S3 credentials come only from environment variables; no instance
+  profile, SSO or multipart upload.
 - Multi-GPU behaviour of the custom-storage mapping is modelled only by the
   mock (two devices).

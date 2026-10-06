@@ -8,7 +8,7 @@
  * ns_wall is the elapsed time of the whole operation. Dividing a summed
  * phase by ns_wall gives the average number of threads busy in that phase.
  */
-#include "internal.h"
+#include "objstore.h"
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -22,6 +22,8 @@
 
 /* ------------------------------------------------------------------ repo */
 
+static int is_s3(const char *path) { return strncmp(path, "s3://", 5) == 0; }
+
 int gc_repo_init(const char *path, uint64_t chunk_size)
 {
     if (chunk_size < MIN_CHUNK || chunk_size > MAX_CHUNK || (chunk_size & (chunk_size - 1))) {
@@ -29,21 +31,36 @@ int gc_repo_init(const char *path, uint64_t chunk_size)
                      (unsigned long long)MIN_CHUNK, (unsigned long long)MAX_CHUNK);
         return GC_EINVAL;
     }
-    char p[PATH_MAX];
-    const char *subs[] = {"", "/chunks", "/snapshots", "/tmp"};
-    for (size_t i = 0; i < 4; i++) {
-        snprintf(p, sizeof p, "%s%s", path, subs[i]);
-        int rc = gc_mkdir_p(p);
+    gc_repo tmp;
+    memset(&tmp, 0, sizeof tmp);
+    tmp.lock_fd = -1;
+    int rc;
+    if (is_s3(path)) {
+        tmp.kind = GC_REPO_S3;
+        snprintf(tmp.path, sizeof tmp.path, "%s", path);
+        rc = gc_s3_open(path, &tmp.s3);
         if (rc) return rc;
+    } else {
+        char p[PATH_MAX];
+        const char *subs[] = {"", "/chunks", "/snapshots", "/tmp"};
+        for (size_t i = 0; i < 4; i++) {
+            snprintf(p, sizeof p, "%s%s", path, subs[i]);
+            rc = gc_mkdir_p(p);
+            if (rc) return rc;
+        }
+        if (!realpath(path, tmp.path)) { gc_set_error("repo %s: %s", path, strerror(errno)); return GC_EIO; }
+    }
+    if (gc_obj_head(&tmp, "config", NULL) == GC_OK) {
+        gc_set_error("repository already initialised: %s/config", path);
+        gc_s3_close(tmp.s3);
+        return GC_EEXIST;
     }
     char cfg[256];
     int n = snprintf(cfg, sizeof cfg, "gpuckpt-repo %d\nchunk_size %llu\nhash sha256\n",
                      GC_FORMAT_VERSION, (unsigned long long)chunk_size);
-    char cfgp[PATH_MAX], tmp[PATH_MAX];
-    snprintf(cfgp, sizeof cfgp, "%s/config", path);
-    snprintf(tmp, sizeof tmp, "%s/tmp", path);
-    int rc = gc_write_file_atomic(cfgp, tmp, cfg, (size_t)n, 0);
-    if (rc == GC_EEXIST) gc_set_error("repository already initialised: %s", cfgp);
+    rc = gc_obj_put(&tmp, "config", cfg, (size_t)n);
+    gc_s3_close(tmp.s3);
+    if (rc == GC_EEXIST) gc_set_error("repository already initialised: %s/config", path);
     return rc;
 }
 
@@ -52,27 +69,36 @@ int gc_repo_open(const char *path, gc_repo **out)
     gc_repo *r = calloc(1, sizeof *r);
     if (!r) return GC_ENOMEM;
     r->lock_fd = -1;
-    if (!realpath(path, r->path)) {
-        gc_set_error("repo %s: %s", path, strerror(errno));
-        free(r);
-        return GC_ENOENT;
+    int rc;
+    if (is_s3(path)) {
+        r->kind = GC_REPO_S3;
+        snprintf(r->path, sizeof r->path, "%s", path);
+        rc = gc_s3_open(path, &r->s3);
+        if (rc) { free(r); return rc; }
+        r->gc_grace_seconds = 3600;
+    } else {
+        if (!realpath(path, r->path)) {
+            gc_set_error("repo %s: %s", path, strerror(errno));
+            free(r);
+            return GC_ENOENT;
+        }
     }
-    char cfgp[PATH_MAX];
-    snprintf(cfgp, sizeof cfgp, "%s/config", r->path);
     void *data = NULL; size_t n = 0;
-    int rc = gc_read_file(cfgp, &data, &n);
-    if (rc) { free(r); return rc; }
+    rc = gc_obj_get(r, "config", &data, &n);
+    if (rc) { if (rc == GC_ENOENT) gc_set_error("%s: not a gpuckpt repository (no config)", path); gc_repo_close(r); return rc; }
     char *text = data;
-    if (n < 16 || strncmp(text, "gpuckpt-repo 1\n", 15) != 0) { free(data); free(r); gc_set_error("%s: not a gpuckpt repository", path); return GC_EINVAL; }
+    if (n < 16 || strncmp(text, "gpuckpt-repo 1\n", 15) != 0) { free(data); gc_repo_close(r); gc_set_error("%s: not a gpuckpt repository", path); return GC_EINVAL; }
     char *cs = strstr(text, "chunk_size ");
-    if (!cs) { free(data); free(r); return GC_EINVAL; }
+    if (!cs) { free(data); gc_repo_close(r); return GC_EINVAL; }
     r->chunk_size = strtoull(cs + 11, NULL, 10);
     free(data);
-    if (r->chunk_size < MIN_CHUNK || r->chunk_size > MAX_CHUNK) { free(r); return GC_EINVAL; }
-    char lp[PATH_MAX];
-    snprintf(lp, sizeof lp, "%s/lock", r->path);
-    r->lock_fd = open(lp, O_RDONLY | O_CREAT, 0644);
-    if (r->lock_fd < 0) { gc_set_error("open %s: %s", lp, strerror(errno)); free(r); return GC_EIO; }
+    if (r->chunk_size < MIN_CHUNK || r->chunk_size > MAX_CHUNK) { gc_repo_close(r); return GC_EINVAL; }
+    if (r->kind == GC_REPO_LOCAL) {
+        char lp[PATH_MAX];
+        snprintf(lp, sizeof lp, "%s/lock", r->path);
+        r->lock_fd = open(lp, O_RDONLY | O_CREAT, 0644);
+        if (r->lock_fd < 0) { gc_set_error("open %s: %s", lp, strerror(errno)); gc_repo_close(r); return GC_EIO; }
+    }
     *out = r;
     return GC_OK;
 }
@@ -81,21 +107,27 @@ void gc_repo_close(gc_repo *r)
 {
     if (!r) return;
     if (r->lock_fd >= 0) close(r->lock_fd);
+    gc_s3_close(r->s3);
     free(r);
 }
+
+const char *gc_repo_kind(const gc_repo *r) { return r->kind == GC_REPO_S3 ? "s3" : "local"; }
+void gc_repo_set_gc_grace(gc_repo *r, int seconds) { r->gc_grace_seconds = seconds; }
+const char *gc_s3_backend(void) { return gc_s3_impl(); }
 
 uint64_t gc_repo_chunk_size(const gc_repo *r) { return r->chunk_size; }
 const char *gc_repo_path(const gc_repo *r) { return r->path; }
 
 int gc_repo_lock(gc_repo *r, int exclusive)
 {
+    if (r->lock_fd < 0) return GC_OK;   /* s3: no lock; gc relies on its grace period */
     if (flock(r->lock_fd, exclusive ? LOCK_EX : LOCK_SH) != 0) {
         gc_set_error("flock: %s", strerror(errno));
         return GC_EIO;
     }
     return GC_OK;
 }
-void gc_repo_unlock(gc_repo *r) { flock(r->lock_fd, LOCK_UN); }
+void gc_repo_unlock(gc_repo *r) { if (r->lock_fd >= 0) flock(r->lock_fd, LOCK_UN); }
 
 /* ----------------------------------------------------------- work pool */
 
@@ -222,7 +254,11 @@ out:
 
 static int run_pool(work *w, int threads)
 {
-    if (threads <= 0) { threads = gc_nprocs(); if (threads > 8) threads = 8; }
+    if (threads <= 0) {
+        threads = gc_nprocs();
+        if (threads > 8) threads = 8;
+        if (w->r->kind == GC_REPO_S3 && threads < 16) threads = 16;   /* latency-bound */
+    }
     if ((uint64_t)threads > w->total && w->total > 0) threads = (int)w->total;
     if (threads < 1) threads = 1;
     w->total = w->prefix[w->m->device_count];
@@ -269,9 +305,9 @@ int gc_snapshot_create(gc_repo *r, gc_image *img, const gc_snapshot_opts *o,
         gc_gen_id(m->id);
     }
     {
-        char p[PATH_MAX];
-        gc_manifest_path(r, m->id, p, sizeof p);
-        if (gc_file_exists(p)) { gc_set_error("snapshot %s already exists", m->id); rc = GC_EEXIST; goto out; }
+        char key[160];
+        gc_manifest_key(m->id, key, sizeof key);
+        if (gc_obj_head(r, key, NULL) == GC_OK) { gc_set_error("snapshot %s already exists", m->id); rc = GC_EEXIST; goto out; }
     }
     if (o && o->parent) snprintf(m->parent, sizeof m->parent, "%s", o->parent);
     if (o && o->note) snprintf(m->note, sizeof m->note, "%s", o->note);
@@ -366,44 +402,42 @@ int gc_snapshot_verify(gc_repo *r, const char *id, gc_stats *st)
 
 int gc_snapshot_forget(gc_repo *r, const char *id)
 {
-    char p[PATH_MAX];
-    int rc = gc_manifest_path(r, id, p, sizeof p);
+    char key[160];
+    int rc = gc_manifest_key(id, key, sizeof key);
     if (rc) return rc;
     rc = gc_repo_lock(r, 0);
     if (rc) return rc;
-    if (unlink(p) != 0) {
-        rc = errno == ENOENT ? GC_ENOENT : GC_EIO;
-        gc_set_error("unlink %s: %s", p, strerror(errno));
-    }
+    rc = gc_obj_delete(r, key, NULL);
     gc_repo_unlock(r);
     return rc;
 }
 
 typedef struct { char (*ids)[GC_ID_LEN]; size_t n, cap; } idlist;
 
+static int collect_cb(const gc_obj_info *info, void *u)
+{
+    idlist *l = u;
+    const char *k = info->key;
+    if (strncmp(k, "snapshots/", 10) != 0) return GC_OK;
+    k += 10;
+    size_t n = strlen(k);
+    if (n <= 9 || strcmp(k + n - 9, ".manifest") != 0 || strchr(k, '/')) return GC_OK;
+    if (n - 9 >= GC_ID_LEN) return GC_OK;
+    if (l->n == l->cap) {
+        size_t nc = l->cap ? l->cap * 2 : 64;
+        void *np = realloc(l->ids, nc * GC_ID_LEN);
+        if (!np) return GC_ENOMEM;
+        l->ids = np; l->cap = nc;
+    }
+    memcpy(l->ids[l->n], k, n - 9);
+    l->ids[l->n][n - 9] = 0;
+    l->n++;
+    return GC_OK;
+}
+
 static int collect_ids(gc_repo *r, idlist *l)
 {
-    char p[PATH_MAX];
-    snprintf(p, sizeof p, "%s/snapshots", r->path);
-    DIR *d = opendir(p);
-    if (!d) return GC_EIO;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        size_t n = strlen(e->d_name);
-        if (n <= 9 || strcmp(e->d_name + n - 9, ".manifest") != 0) continue;
-        if (n - 9 >= GC_ID_LEN) continue;
-        if (l->n == l->cap) {
-            size_t nc = l->cap ? l->cap * 2 : 64;
-            void *np = realloc(l->ids, nc * GC_ID_LEN);
-            if (!np) { closedir(d); return GC_ENOMEM; }
-            l->ids = np; l->cap = nc;
-        }
-        memcpy(l->ids[l->n], e->d_name, n - 9);
-        l->ids[l->n][n - 9] = 0;
-        l->n++;
-    }
-    closedir(d);
-    return GC_OK;
+    return gc_obj_list(r, "snapshots/", collect_cb, l);
 }
 
 static int cmp_id(const void *a, const void *b) { return strcmp(a, b); }
@@ -424,25 +458,32 @@ typedef struct {
     gc_repo *r;
     uint8_t (*live)[GC_HASH_LEN];
     size_t nlive;
-    uint64_t deleted, bytes;
-    int rc;
+    uint64_t deleted, bytes, skipped_young;
+    int64_t now;
 } gcwalk;
 
-static int gc_cb(const uint8_t *hash, const char *path, void *u)
+static int gc_cb(const gc_obj_info *info, void *u)
 {
     gcwalk *g = u;
-    (void)path;
+    uint8_t hash[GC_HASH_LEN];
+    if (gc_store_key_parse(info->key, hash) != GC_OK) return GC_OK;   /* foreign object: leave it */
     if (g->nlive && bsearch(hash, g->live, g->nlive, GC_HASH_LEN, cmp_hash)) return GC_OK;
-    uint64_t b = 0;
-    int rc = gc_store_delete(g->r, hash, &b);
-    if (rc == GC_OK) { g->deleted++; g->bytes += b; }
+    if (g->r->gc_grace_seconds > 0 && info->mtime >= 0 && g->now - info->mtime < g->r->gc_grace_seconds) {
+        g->skipped_young++;
+        return GC_OK;
+    }
+    int rc = gc_obj_delete(g->r, info->key, NULL);
+    if (rc == GC_OK) { g->deleted++; g->bytes += info->size; }
     else if (rc != GC_ENOENT) return rc;
     return GC_OK;
 }
 
 /* Delete every chunk not referenced by any manifest. Takes the exclusive
- * repo lock, so no snapshot or restore is in flight. If any manifest fails
- * to load, nothing is deleted: an unknown live set is not an empty one. */
+ * repo lock where one exists (local), so no snapshot or restore is in
+ * flight; on S3 there is no lock, so unreferenced chunks younger than the
+ * grace period are left alone because a concurrent snapshot may have just
+ * deduplicated against them. If any manifest fails to load, nothing is
+ * deleted: an unknown live set is not an empty one. */
 int gc_repo_gc(gc_repo *r, uint64_t *chunks_deleted, uint64_t *bytes_freed)
 {
     int rc = gc_repo_lock(r, 1);
@@ -471,12 +512,12 @@ int gc_repo_gc(gc_repo *r, uint64_t *chunks_deleted, uint64_t *bytes_freed)
         gc_manifest_free(m);
     }
     qsort(live, nlive, GC_HASH_LEN, cmp_hash);
-    gcwalk g = { .r = r, .live = live, .nlive = nlive };
-    rc = gc_store_walk(r, gc_cb, &g);
+    gcwalk g = { .r = r, .live = live, .nlive = nlive, .now = (int64_t)time(NULL) };
+    rc = gc_obj_list(r, "chunks/", gc_cb, &g);
     if (chunks_deleted) *chunks_deleted = g.deleted;
     if (bytes_freed) *bytes_freed = g.bytes;
-    /* stale staging files from crashed writers */
-    {
+    /* stale staging files from crashed writers (local only) */
+    if (r->kind == GC_REPO_LOCAL) {
         char tp[PATH_MAX];
         snprintf(tp, sizeof tp, "%s/tmp", r->path);
         DIR *d = opendir(tp);

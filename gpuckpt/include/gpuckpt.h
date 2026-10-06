@@ -88,11 +88,19 @@ void gc_image_file_close(gc_image *img);
 
 typedef struct gc_repo gc_repo;
 
+/* path is a directory or an s3://bucket[/prefix] url. */
 int      gc_repo_init(const char *path, uint64_t chunk_size);
 int      gc_repo_open(const char *path, gc_repo **out);
 void     gc_repo_close(gc_repo *r);
 uint64_t gc_repo_chunk_size(const gc_repo *r);
 const char *gc_repo_path(const gc_repo *r);
+const char *gc_repo_kind(const gc_repo *r);        /* "local" or "s3" */
+/* gc never deletes an unreferenced chunk younger than this. On a local repo
+ * the exclusive lock makes it unnecessary (default 0); on S3, where there is
+ * no lock, it protects chunks a concurrent snapshot has just deduplicated
+ * against (default 3600). */
+void gc_repo_set_gc_grace(gc_repo *r, int seconds);
+const char *gc_s3_backend(void);                   /* "libcurl" or "unavailable" */
 
 /* ------------------------------------------------------------- snapshot --- */
 

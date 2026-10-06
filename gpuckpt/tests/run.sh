@@ -239,6 +239,8 @@ rm -rf "$T/mock"; GPUCKPT_MOCK_IMAGES="$T/dev0.orig" $BIN snapshot --repo "$T/cr
 rc=0; GPUCKPT_MOCK_IMAGES="$T/dev0.orig" $BIN restore --repo "$T/crepo" --pid 7 --snapshot g1 > "$T/mm.out" 2>&1 || rc=$?
 [ $rc = 3 ] && grep -q "devices" "$T/mm.out" && ok "shape mismatch refused before any copy (exit 3, target left RESTORING)" || { bad "mismatch rc=$rc"; cat "$T/mm.out"; }
 
+source tests/s3_tests.sh
+
 echo
 echo "passed=$pass failed=$fail"
 [ $fail = 0 ]

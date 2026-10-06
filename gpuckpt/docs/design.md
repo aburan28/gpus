@@ -5,11 +5,17 @@
 ```
 <repo>/
   config                  format version, chunk size, hash algorithm
-  lock                    flock: shared for snapshot/restore/verify, exclusive for gc
-  chunks/<hh>/<sha256>    one file per distinct chunk content, write-once
-  snapshots/<id>.manifest one file per snapshot, write-once, self-checked
-  tmp/                    staging for atomic writes
+  lock                    flock: shared for snapshot/restore/verify, exclusive for gc (local only)
+  chunks/<hh>/<sha256>    one object per distinct chunk content, write-once
+  snapshots/<id>.manifest one object per snapshot, write-once, self-checked
+  tmp/                    staging for atomic writes (local only)
 ```
+
+The repo is a directory or an S3 prefix with the same keys. All access goes
+through five object operations in `src/objstore.h` (put-if-absent, get,
+head, delete, list); `src/objstore.c` implements them on a directory and
+`src/s3.c` on S3. See `docs/s3.md` for the S3 specifics, including why gc
+uses a grace period there instead of a lock.
 
 A manifest lists, per device, the image size and the ordered SHA-256 of
 every fixed-size chunk. The final chunk may be short. The manifest ends
