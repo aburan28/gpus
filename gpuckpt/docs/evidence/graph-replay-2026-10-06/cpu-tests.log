@@ -1,0 +1,132 @@
+built: cuda-header=mock
+bash tests/run.sh
+test_directory=./build/tmp-test.ojGO0x
+== build info
+gpuckpt 0.1.0
+hash: sha256 (builtin)
+cuda-header: mock (UNVERIFIED)
+s3: unavailable
+format: 1
+== sha256 known vector
+  ok   sha256(abc) matches FIPS vector
+== generate images (dev0: 40 MiB structured, dev1: 5 MiB + 123 B tail)
+== repo init / immutability
+  ok   ./build/gpuckpt init --repo ./build/tmp-test.ojGO0x/repo --chunk-size 1048576
+  ok   (fails as expected) ./build/gpuckpt init --repo ./build/tmp-test.ojGO0x/repo --chunk-size 1048576
+  ok   (fails as expected) ./build/gpuckpt init --repo ./build/tmp-test.ojGO0x/badcs --chunk-size 1000
+== first snapshot: dedup within image
+  ok   chunks_total=46
+  ok   chunks_new=43 (unique content only)
+  ok   bytes_total exact
+  ok   store holds exactly 43 chunk files
+  ok   (fails as expected) ./build/gpuckpt snapshot-file --repo ./build/tmp-test.ojGO0x/repo --input ./build/tmp-test.ojGO0x/dev0.img --id s1
+== second snapshot after modifying 3 chunks of dev0: only 3 new
+  ok   chunks_new=3
+  ok   bytes_new=3 chunks
+  ok   chunks_same_as_parent=43
+== third snapshot, no changes: zero new bytes
+  ok   chunks_new=0
+== restore to files and compare bytes
+  ok   cmp ./build/tmp-test.ojGO0x/r1_0 ./build/tmp-test.ojGO0x/dev0.orig
+  ok   cmp ./build/tmp-test.ojGO0x/r1_1 ./build/tmp-test.ojGO0x/dev1.orig
+  ok   cmp ./build/tmp-test.ojGO0x/r2_0 ./build/tmp-test.ojGO0x/dev0.img
+  ok   cmp ./build/tmp-test.ojGO0x/r2_1 ./build/tmp-test.ojGO0x/dev1.img
+  ok   (fails as expected) ./build/gpuckpt restore-file --repo ./build/tmp-test.ojGO0x/repo --snapshot s2 --output ./build/tmp-test.ojGO0x/only_one
+  ok   (fails as expected) ./build/gpuckpt restore-file --repo ./build/tmp-test.ojGO0x/repo --snapshot nope --output ./build/tmp-test.ojGO0x/x,./build/tmp-test.ojGO0x/y
+== list / show / verify
+  ok   list sorted
+  ok   ./build/gpuckpt show --repo ./build/tmp-test.ojGO0x/repo --snapshot s1
+  ok   note recorded
+  ok   ./build/gpuckpt verify --repo ./build/tmp-test.ojGO0x/repo
+== manifest tamper: trailer catches it
+  ok   (fails as expected) ./build/gpuckpt show --repo ./build/tmp-test.ojGO0x/repo --snapshot s3
+  ok   (fails as expected) ./build/gpuckpt show --repo ./build/tmp-test.ojGO0x/repo --snapshot s3
+  ok   ./build/gpuckpt show --repo ./build/tmp-test.ojGO0x/repo --snapshot s3
+== forget + gc reclaims exactly the 3 chunks only s1 referenced
+  ok   ./build/gpuckpt forget --repo ./build/tmp-test.ojGO0x/repo --snapshot s1
+  ok   (fails as expected) ./build/gpuckpt forget --repo ./build/tmp-test.ojGO0x/repo --snapshot s1
+  ok   gc deleted 3
+  ok   gc freed 3 chunks of bytes
+  ok   ./build/gpuckpt verify --repo ./build/tmp-test.ojGO0x/repo --snapshot s2
+  ok   (fails as expected) ./build/gpuckpt verify --repo ./build/tmp-test.ojGO0x/repo --snapshot s1
+== gc refuses to run with an unreadable manifest (unknown live set != empty)
+  ok   (fails as expected) ./build/gpuckpt gc --repo ./build/tmp-test.ojGO0x/repo
+  ok   ./build/gpuckpt gc --repo ./build/tmp-test.ojGO0x/repo
+== chunk corruption: verify reports, restore refuses
+  ok   verify counts 1 corrupt chunk
+  ok   (fails as expected) ./build/gpuckpt restore-file --repo ./build/tmp-test.ojGO0x/repo --snapshot s2 --output ./build/tmp-test.ojGO0x/c0,./build/tmp-test.ojGO0x/c1
+  ok   verify counts 1 missing chunk
+  ok   ./build/gpuckpt verify --repo ./build/tmp-test.ojGO0x/repo --snapshot s2
+== concurrent snapshots into one repo
+  ok   ./build/gpuckpt verify --repo ./build/tmp-test.ojGO0x/repo --snapshot cA
+  ok   ./build/gpuckpt verify --repo ./build/tmp-test.ojGO0x/repo --snapshot cB
+== dedup race: 64 identical chunks, 8 threads -> exactly 1 new chunk, 10 rounds
+  ok   chunks_new=1 in all 10 rounds
+== 1-thread and 8-thread snapshots produce identical manifests (minus id/time/stats)
+  ok   chunk lists identical
+== mock CUDA driver: full custom-storage lifecycle
+  ok   initial state RUNNING
+  ok   (fails as expected) ./build/gpuckpt restore --repo ./build/tmp-test.ojGO0x/crepo --pid 4242 --snapshot nothing
+  ok   (fails as expected) ./build/gpuckpt unlock --pid 4242
+  ok   ./build/gpuckpt restore-tid --pid 4242
+-- snapshot --resume: checkpoint, restore in place, unlock
+  ok   target RUNNING after resume
+  ok   46 chunks captured through the adapter
+  ok   device 0 UUID recorded via pointer->ordinal lookup
+  ok   device 1 UUID recorded
+  ok   cmp ./build/tmp-test.ojGO0x/mock/4242.mem.0 ./build/tmp-test.ojGO0x/dev0.orig
+  ok   cmp ./build/tmp-test.ojGO0x/mock/4242.mem.1 ./build/tmp-test.ojGO0x/dev1.orig
+  ok   cmp ./build/tmp-test.ojGO0x/g1_0 ./build/tmp-test.ojGO0x/dev0.orig
+  ok   cmp ./build/tmp-test.ojGO0x/g1_1 ./build/tmp-test.ojGO0x/dev1.orig
+-- target keeps running and changes memory; next snapshot stores only the delta
+  ok   1 new chunk after 1 chunk changed
+  ok   target CHECKPOINTED (no --resume)
+  ok   mock released GPU memory on complete
+  ok   (fails as expected) ./build/gpuckpt snapshot --repo ./build/tmp-test.ojGO0x/crepo --pid 4242
+  ok   (fails as expected) ./build/gpuckpt lock --pid 4242
+-- restore the earlier snapshot g1 into the checkpointed target
+  ok   RUNNING after restore+unlock
+  ok   cmp ./build/tmp-test.ojGO0x/mock/4242.mem.0 ./build/tmp-test.ojGO0x/dev0.orig
+  ok   cmp ./build/tmp-test.ojGO0x/mock/4242.mem.1 ./build/tmp-test.ojGO0x/dev1.orig
+-- restore g2 with --no-unlock leaves target LOCKED; unlock separately
+  ok   LOCKED with --no-unlock
+  ok   cmp ./build/tmp-test.ojGO0x/mock/4242.mem.0 ./build/tmp-test.ojGO0x/dev0.v2
+  ok   ./build/gpuckpt unlock --pid 4242
+  ok   RUNNING after unlock
+-- lock on an already LOCKED target is accepted by snapshot (no double lock)
+  ok   ./build/gpuckpt lock --pid 4242 --timeout-ms 100
+  ok   snapshot from LOCKED
+-- driver allocates the info struct (alternate reading of the reference)
+  ok   adapter handles driver-allocated info
+-- fault injection
+  ok   lock timeout -> exit 2
+  ok   timeout message names the timeout
+  ok   still RUNNING after lock timeout
+  ok   complete failure -> exit 3 (state unknown)
+  ok   snapshot reported as stored despite complete failure
+  ok   ./build/gpuckpt verify --repo ./build/tmp-test.ojGO0x/crepo --snapshot g7
+  ok   target reports CHECKPOINTING (stuck, as a real driver would)
+-- restore refuses a snapshot whose shape does not match the target
+  ok   shape mismatch refused before any copy (exit 3, target left RESTORING)
+== S3 backend not built (no libcurl): section skipped
+
+passed=77 failed=0
+python3 -m unittest discover -s tests -p 'test_graph_replay.py' -v
+test_bad_checksum (test_graph_replay.ProtocolTests.test_bad_checksum) ... ok
+test_bad_launch_count (test_graph_replay.ProtocolTests.test_bad_launch_count) ... ok
+test_changed_identities (test_graph_replay.ProtocolTests.test_changed_identities) ... ok
+test_failed_command_retains_evidence (test_graph_replay.ProtocolTests.test_failed_command_retains_evidence) ... ok
+test_failed_state_stops_restore (test_graph_replay.ProtocolTests.test_failed_state_stops_restore) ... ok
+test_graph_rebuilt (test_graph_replay.ProtocolTests.test_graph_rebuilt) ... ok
+test_missing_prerequisites_are_blocked (test_graph_replay.ProtocolTests.test_missing_prerequisites_are_blocked) ... ok
+test_mock_build_and_override_are_blocked (test_graph_replay.ProtocolTests.test_mock_build_and_override_are_blocked) ... ok
+test_partial_line_timeout (test_graph_replay.ProtocolTests.test_partial_line_timeout) ... ok
+test_resume_does_not_restore_twice (test_graph_replay.ProtocolTests.test_resume_does_not_restore_twice) ... ok
+test_separate_restore_uses_current_snapshot (test_graph_replay.ProtocolTests.test_separate_restore_uses_current_snapshot) ... ok
+test_valid_event (test_graph_replay.ProtocolTests.test_valid_event) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.249s
+
+OK
+graph-replay: blocked; evidence: /tmp/tmpx2i1xnpy/evidence/report.json

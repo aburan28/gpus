@@ -5,6 +5,8 @@
 #   make            build/gpuckpt (CLI) + build/libgpuckpt.a (+ mock driver, signer test)
 #   make test       CPU-only test suite (host-image backend + mock libcuda)
 #   make bench      synthetic CPU-only benchmark of the storage layer
+#   make graph-workload  real-header graph workload (C + embedded PTX; no nvcc)
+#   make test-graphs GRAPH_OUTPUT=/new/evidence/dir  real-driver replay validation
 #   make clean
 #
 # The CUDA adapter needs <cuda.h> for the checkpoint struct layouts. If
@@ -75,6 +77,19 @@ $(B)/sigv4_test: tests/sigv4_test.c $(B)/libgpuckpt.a
 
 test: all $(B)/libcuda_mock.so $(B)/sigv4_test
 	bash tests/run.sh
+	python3 -m unittest discover -s tests -p 'test_graph_replay.py' -v
+
+# A graph fixture must never build against tests/mock/cuda.h. The CPU test
+# suite tests the Python orchestration, not CUDA graph execution.
+$(B)/graph_replay: tests/cuda/graph_replay.c | $(B)
+	@test "$(CUDA_HDR)" = real || { echo "graph-workload requires real CUDA headers (set CUDA_HOME)" >&2; exit 1; }
+	$(CC) -O2 -g -std=gnu11 -Wall -Wextra -Werror -I$(CUDA_HOME)/include -o $@ $< -ldl
+
+graph-workload: $(B)/graph_replay
+
+test-graphs: all graph-workload
+	@test -n "$(GRAPH_OUTPUT)" || { echo "set GRAPH_OUTPUT to a new evidence directory" >&2; exit 1; }
+	python3 scripts/graph-replay.py --output "$(GRAPH_OUTPUT)"
 
 bench: all
 	bash bench/bench.sh
@@ -82,4 +97,4 @@ bench: all
 clean:
 	rm -rf $(B)
 
-.PHONY: all test bench clean
+.PHONY: all test bench clean graph-workload test-graphs

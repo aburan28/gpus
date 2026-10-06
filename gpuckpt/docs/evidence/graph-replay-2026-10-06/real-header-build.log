@@ -1,0 +1,16 @@
+mkdir -p build
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/sha256.o src/sha256.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/store.o src/store.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/manifest.o src/manifest.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/image_file.o src/image_file.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/snapshot.o src/snapshot.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/util.o src/util.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/objstore.o src/objstore.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/s3.o src/s3.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -I/workspace/scratch/a7ac94ab1beb/cuda-headers/nvidia/cu13/include -DGPUCKPT_CUDA_HEADER_REAL=1 -c -o build/cuda_backend.o src/cuda_backend.c
+ar rcs build/libgpuckpt.a build/sha256.o build/store.o build/manifest.o build/image_file.o build/snapshot.o build/util.o build/objstore.o build/s3.o build/cuda_backend.o
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -I/workspace/scratch/a7ac94ab1beb/cuda-headers/nvidia/cu13/include -DGPUCKPT_CUDA_HEADER_REAL=1 -o build/gpuckpt src/cli.c build/libgpuckpt.a -pthread -ldl
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -Wno-missing-prototypes -Itests/mock -shared -fPIC -o build/libcuda_mock.so tests/mock/libcuda_mock.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -o build/sigv4_test tests/sigv4_test.c build/libgpuckpt.a -pthread -ldl
+built: cuda-header=real
+cc -O2 -g -std=gnu11 -Wall -Wextra -Werror -I/workspace/scratch/a7ac94ab1beb/cuda-headers/nvidia/cu13/include -o build/graph_replay tests/cuda/graph_replay.c -ldl

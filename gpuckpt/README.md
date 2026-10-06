@@ -20,10 +20,17 @@ driver. The open hardware questions are tracked in [docs/gates.md](docs/gates.md
 
 ## Build and test
 
+CUDA graph replay validation is available through `make graph-workload` and
+`make test-graphs GRAPH_OUTPUT=/new/evidence/dir` on a real CUDA host. The
+workload retains one executable across repeated checkpoint/restore cycles
+and compares verified results with an uninterrupted control. See
+[docs/graphs.md](docs/graphs.md). Real GPU graph replay remains unverified.
+
 ```sh
 make                 # build/gpuckpt, build/libgpuckpt.a, build/libcuda_mock.so
 make test            # 106 CPU-only checks (host files, mock driver, mock S3 endpoint)
 make bench           # synthetic storage-layer benchmark
+make graph-workload  # real-header Driver API graph workload; no nvcc required
 CUDA_HOME=/usr/local/cuda make   # on a CUDA host: real header, binary reports cuda-header: real
 ```
 

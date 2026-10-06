@@ -14,6 +14,15 @@ the mock driver; it never stands in for the GPU evidence the gate asks for.
 | 5 | Does a low change rate reduce pause time materially? | Timings are split: `checkpoint.ns_lock`, `ns_map`, `ns_copy`, `ns_complete`, and per-phase `ns_read/ns_hash/ns_write`, plus `restore.*`. The CPU benchmark shows the storage-layer share only. | Open. The hash still reads the full image; whether that dominates the pause is a measurement on the real copy path. |
 | 6 | Can the application continue during export? | Yes, by construction: `--resume` restores and unlocks only after `cuCheckpointOperationComplete` has succeeded on a fully stored snapshot. No access to a mapping after complete (`cu_read` refuses). Export to remote storage is not implemented; it would operate on the committed store, never on a mapping. | Lifetime handling CPU-tested (`tests/run.sh`, fault-injection section). Concurrency on a real driver untested. |
 
+## Graph replay gate (7)
+
+Does the same executable CUDA graph replay correctly after restoring through
+custom storage? `tests/cuda/graph_replay.c` and `scripts/graph-replay.py` test
+captured and explicit graphs, unchanged handles/allocations, repeated
+checkpoint cycles and output equality against an uninterrupted control.
+**Open: no real GPU graph run yet.** CPU orchestration checks and compilation
+against real headers do not close this gate. See [graphs.md](graphs.md).
+
 ## Additional facts established from the CUDA 13.4 reference
 
 - `customStorageInfo_out` is a pointer-to-pointer. Whether the driver fills
