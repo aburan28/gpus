@@ -5,6 +5,20 @@ on:
   pull_request:
     paths: ['gpuckpt/**', '.github/workflows/gpuckpt-ci.yml']
 jobs:
+  cuda-header-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gpuckpt
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install real NVIDIA CUDA headers (compile only)
+        run: pip install nvidia-cuda-runtime==13.4.92
+      - name: Compile adapter and graph workload against CUDA 13.4
+        run: |
+          GPUCKPT_CUDA_HOME=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"] + "/nvidia/cu13")')
+          make all graph-workload CUDA_HOME="$GPUCKPT_CUDA_HOME"
+          ./build/gpuckpt version | grep -q 'cuda-header: real'
   test:
     runs-on: ubuntu-latest
     defaults:

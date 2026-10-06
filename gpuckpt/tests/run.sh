@@ -6,8 +6,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 BIN=./build/gpuckpt
 MOCK=./build/libcuda_mock.so
-T=./tmp-test
-rm -rf "$T"; mkdir -p "$T"
+# Isolate repeated runs (including mock process state and fault injection).
+# Keep evidence until make clean, rather than reusing one mutable directory.
+T=$(mktemp -d ./build/tmp-test.XXXXXX)
+echo "test_directory=$T"
 CS=$((1<<20))
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }

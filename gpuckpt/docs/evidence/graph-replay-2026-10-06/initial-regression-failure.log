@@ -1,0 +1,124 @@
+mkdir -p build
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/sha256.o src/sha256.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/store.o src/store.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/manifest.o src/manifest.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/image_file.o src/image_file.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/snapshot.o src/snapshot.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/util.o src/util.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/objstore.o src/objstore.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -c -o build/s3.o src/s3.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -Itests/mock -DGPUCKPT_CUDA_HEADER_REAL=0 -c -o build/cuda_backend.o src/cuda_backend.c
+ar rcs build/libgpuckpt.a build/sha256.o build/store.o build/manifest.o build/image_file.o build/snapshot.o build/util.o build/objstore.o build/s3.o build/cuda_backend.o
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -Itests/mock -DGPUCKPT_CUDA_HEADER_REAL=0 -o build/gpuckpt src/cli.c build/libgpuckpt.a -pthread -ldl
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -Wno-missing-prototypes -Itests/mock -shared -fPIC -o build/libcuda_mock.so tests/mock/libcuda_mock.c
+cc -O2 -g -std=gnu11 -Wall -Wextra -Wshadow -Wpointer-arith -pthread -Iinclude -Isrc -o build/sigv4_test tests/sigv4_test.c build/libgpuckpt.a -pthread -ldl
+built: cuda-header=mock
+bash tests/run.sh
+== build info
+gpuckpt 0.1.0
+hash: sha256 (builtin)
+cuda-header: mock (UNVERIFIED)
+s3: unavailable
+format: 1
+== sha256 known vector
+  ok   sha256(abc) matches FIPS vector
+== generate images (dev0: 40 MiB structured, dev1: 5 MiB + 123 B tail)
+== repo init / immutability
+  ok   ./build/gpuckpt init --repo ./tmp-test/repo --chunk-size 1048576
+  ok   (fails as expected) ./build/gpuckpt init --repo ./tmp-test/repo --chunk-size 1048576
+  ok   (fails as expected) ./build/gpuckpt init --repo ./tmp-test/badcs --chunk-size 1000
+== first snapshot: dedup within image
+  ok   chunks_total=46
+  ok   chunks_new=43 (unique content only)
+  ok   bytes_total exact
+  ok   store holds exactly 43 chunk files
+  ok   (fails as expected) ./build/gpuckpt snapshot-file --repo ./tmp-test/repo --input ./tmp-test/dev0.img --id s1
+== second snapshot after modifying 3 chunks of dev0: only 3 new
+  ok   chunks_new=3
+  ok   bytes_new=3 chunks
+  ok   chunks_same_as_parent=43
+== third snapshot, no changes: zero new bytes
+  ok   chunks_new=0
+== restore to files and compare bytes
+  ok   cmp ./tmp-test/r1_0 ./tmp-test/dev0.orig
+  ok   cmp ./tmp-test/r1_1 ./tmp-test/dev1.orig
+  ok   cmp ./tmp-test/r2_0 ./tmp-test/dev0.img
+  ok   cmp ./tmp-test/r2_1 ./tmp-test/dev1.img
+  ok   (fails as expected) ./build/gpuckpt restore-file --repo ./tmp-test/repo --snapshot s2 --output ./tmp-test/only_one
+  ok   (fails as expected) ./build/gpuckpt restore-file --repo ./tmp-test/repo --snapshot nope --output ./tmp-test/x,./tmp-test/y
+== list / show / verify
+  ok   list sorted
+  ok   ./build/gpuckpt show --repo ./tmp-test/repo --snapshot s1
+  ok   note recorded
+  ok   ./build/gpuckpt verify --repo ./tmp-test/repo
+== manifest tamper: trailer catches it
+  ok   (fails as expected) ./build/gpuckpt show --repo ./tmp-test/repo --snapshot s3
+  ok   (fails as expected) ./build/gpuckpt show --repo ./tmp-test/repo --snapshot s3
+  ok   ./build/gpuckpt show --repo ./tmp-test/repo --snapshot s3
+== forget + gc reclaims exactly the 3 chunks only s1 referenced
+  ok   ./build/gpuckpt forget --repo ./tmp-test/repo --snapshot s1
+  ok   (fails as expected) ./build/gpuckpt forget --repo ./tmp-test/repo --snapshot s1
+  ok   gc deleted 3
+  ok   gc freed 3 chunks of bytes
+  ok   ./build/gpuckpt verify --repo ./tmp-test/repo --snapshot s2
+  ok   (fails as expected) ./build/gpuckpt verify --repo ./tmp-test/repo --snapshot s1
+== gc refuses to run with an unreadable manifest (unknown live set != empty)
+  ok   (fails as expected) ./build/gpuckpt gc --repo ./tmp-test/repo
+  ok   ./build/gpuckpt gc --repo ./tmp-test/repo
+== chunk corruption: verify reports, restore refuses
+  ok   verify counts 1 corrupt chunk
+  ok   (fails as expected) ./build/gpuckpt restore-file --repo ./tmp-test/repo --snapshot s2 --output ./tmp-test/c0,./tmp-test/c1
+  ok   verify counts 1 missing chunk
+  ok   ./build/gpuckpt verify --repo ./tmp-test/repo --snapshot s2
+== concurrent snapshots into one repo
+  ok   ./build/gpuckpt verify --repo ./tmp-test/repo --snapshot cA
+  ok   ./build/gpuckpt verify --repo ./tmp-test/repo --snapshot cB
+== dedup race: 64 identical chunks, 8 threads -> exactly 1 new chunk, 10 rounds
+  ok   chunks_new=1 in all 10 rounds
+== 1-thread and 8-thread snapshots produce identical manifests (minus id/time/stats)
+  ok   chunk lists identical
+== mock CUDA driver: full custom-storage lifecycle
+  ok   initial state RUNNING
+  ok   (fails as expected) ./build/gpuckpt restore --repo ./tmp-test/crepo --pid 4242 --snapshot nothing
+  ok   (fails as expected) ./build/gpuckpt unlock --pid 4242
+  ok   ./build/gpuckpt restore-tid --pid 4242
+-- snapshot --resume: checkpoint, restore in place, unlock
+  ok   target RUNNING after resume
+  ok   46 chunks captured through the adapter
+  ok   device 0 UUID recorded via pointer->ordinal lookup
+  ok   device 1 UUID recorded
+  ok   cmp ./tmp-test/mock/4242.mem.0 ./tmp-test/dev0.orig
+  ok   cmp ./tmp-test/mock/4242.mem.1 ./tmp-test/dev1.orig
+  ok   cmp ./tmp-test/g1_0 ./tmp-test/dev0.orig
+  ok   cmp ./tmp-test/g1_1 ./tmp-test/dev1.orig
+-- target keeps running and changes memory; next snapshot stores only the delta
+  ok   1 new chunk after 1 chunk changed
+  ok   target CHECKPOINTED (no --resume)
+  ok   mock released GPU memory on complete
+  ok   (fails as expected) ./build/gpuckpt snapshot --repo ./tmp-test/crepo --pid 4242
+  ok   (fails as expected) ./build/gpuckpt lock --pid 4242
+-- restore the earlier snapshot g1 into the checkpointed target
+  ok   RUNNING after restore+unlock
+  ok   cmp ./tmp-test/mock/4242.mem.0 ./tmp-test/dev0.orig
+  ok   cmp ./tmp-test/mock/4242.mem.1 ./tmp-test/dev1.orig
+-- restore g2 with --no-unlock leaves target LOCKED; unlock separately
+  ok   LOCKED with --no-unlock
+  ok   cmp ./tmp-test/mock/4242.mem.0 ./tmp-test/dev0.v2
+  ok   ./build/gpuckpt unlock --pid 4242
+  ok   RUNNING after unlock
+-- lock on an already LOCKED target is accepted by snapshot (no double lock)
+  ok   ./build/gpuckpt lock --pid 4242 --timeout-ms 100
+  FAIL snapshot from LOCKED
+-- driver allocates the info struct (alternate reading of the reference)
+  FAIL alloc-info variant
+error: target pid 4242 is CHECKPOINTING; snapshot needs RUNNING or LOCKED
+-- fault injection
+  ok   lock timeout -> exit 2
+  FAIL msg: error: target pid 4242 is CHECKPOINTING; snapshot needs RUNNING or LOCKED
+  FAIL state after timeout
+  FAIL exit 2
+  FAIL msg
+  ok   ./build/gpuckpt verify --repo ./tmp-test/crepo --snapshot g7
+  ok   target reports CHECKPOINTING (stuck, as a real driver would)
+-- restore refuses a snapshot whose shape does not match the target
+make: *** [Makefile:79: test] Error 3
