@@ -20,15 +20,15 @@
  * before any chunk is touched. Manifests are write-once; gc_manifest_save
  * refuses to overwrite an existing id.
  */
-#include "internal.h"
+#include "objstore.h"
 #include <stdarg.h>
 #include <dirent.h>
 #include <unistd.h>
 
-int gc_manifest_path(const gc_repo *r, const char *id, char *out, size_t outlen)
+int gc_manifest_key(const char *id, char *out, size_t outlen)
 {
     if (!gc_valid_id(id)) return GC_EINVAL;
-    int n = snprintf(out, outlen, "%s/snapshots/%s.manifest", r->path, id);
+    int n = snprintf(out, outlen, "snapshots/%s.manifest", id);
     return (n < 0 || (size_t)n >= outlen) ? GC_EINVAL : GC_OK;
 }
 
@@ -120,15 +120,14 @@ static int serialize(const gc_manifest *m, sbuf *b)
 
 int gc_manifest_save(gc_repo *r, const gc_manifest *m)
 {
-    char path[PATH_MAX], tmp[PATH_MAX];
-    int rc = gc_manifest_path(r, m->id, path, sizeof path);
+    char key[160];
+    int rc = gc_manifest_key(m->id, key, sizeof key);
     if (rc) return rc;
-    if (gc_file_exists(path)) return GC_EEXIST;
+    if (gc_obj_head(r, key, NULL) == GC_OK) return GC_EEXIST;
     sbuf b = {0};
     rc = serialize(m, &b);
     if (rc) { free(b.p); return rc; }
-    snprintf(tmp, sizeof tmp, "%s/tmp", r->path);
-    rc = gc_write_file_atomic(path, tmp, b.p, b.n, 0);
+    rc = gc_obj_put(r, key, b.p, b.n);
     free(b.p);
     return rc;
 }
@@ -145,12 +144,12 @@ static int parse_u64(const char *s, uint64_t *out)
 
 int gc_manifest_load(gc_repo *r, const char *id, gc_manifest **out)
 {
-    char path[PATH_MAX];
-    int rc = gc_manifest_path(r, id, path, sizeof path);
+    char key[160];
+    int rc = gc_manifest_key(id, key, sizeof key);
     if (rc) return rc;
     void *data = NULL;
     size_t n = 0;
-    rc = gc_read_file(path, &data, &n);
+    rc = gc_obj_get(r, key, &data, &n);
     if (rc) return rc;
     char *text = data;
 
@@ -191,21 +190,21 @@ int gc_manifest_load(gc_repo *r, const char *id, gc_manifest **out)
         char *sp = strchr(line, ' ');
         if (!sp) { rc = GC_EINVAL; goto fail; }
         *sp = 0;
-        const char *key = line, *val = sp + 1;
+        const char *k = line, *val = sp + 1;
         uint64_t u;
-        if (!strcmp(key, "id")) { snprintf(m->id, sizeof m->id, "%s", val); }
-        else if (!strcmp(key, "parent")) { if (strcmp(val, "-")) snprintf(m->parent, sizeof m->parent, "%s", val); }
-        else if (!strcmp(key, "created_unix_ns")) { if (parse_u64(val, &u)) { rc = GC_EINVAL; goto fail; } m->created_unix_ns = u; }
-        else if (!strcmp(key, "pid")) { m->pid = atoi(val); }
-        else if (!strcmp(key, "chunk_size")) { if (parse_u64(val, &u) || !u) { rc = GC_EINVAL; goto fail; } m->chunk_size = u; }
-        else if (!strcmp(key, "hash")) { if (strcmp(val, "sha256")) { rc = GC_EINVAL; goto fail; } }
-        else if (!strcmp(key, "backend")) { snprintf(m->backend, sizeof m->backend, "%s", val); }
-        else if (!strcmp(key, "note")) { if (strcmp(val, "-")) snprintf(m->note, sizeof m->note, "%s", val); }
-        else if (!strcmp(key, "device_count")) {
+        if (!strcmp(k, "id")) { snprintf(m->id, sizeof m->id, "%s", val); }
+        else if (!strcmp(k, "parent")) { if (strcmp(val, "-")) snprintf(m->parent, sizeof m->parent, "%s", val); }
+        else if (!strcmp(k, "created_unix_ns")) { if (parse_u64(val, &u)) { rc = GC_EINVAL; goto fail; } m->created_unix_ns = u; }
+        else if (!strcmp(k, "pid")) { m->pid = atoi(val); }
+        else if (!strcmp(k, "chunk_size")) { if (parse_u64(val, &u) || !u) { rc = GC_EINVAL; goto fail; } m->chunk_size = u; }
+        else if (!strcmp(k, "hash")) { if (strcmp(val, "sha256")) { rc = GC_EINVAL; goto fail; } }
+        else if (!strcmp(k, "backend")) { snprintf(m->backend, sizeof m->backend, "%s", val); }
+        else if (!strcmp(k, "note")) { if (strcmp(val, "-")) snprintf(m->note, sizeof m->note, "%s", val); }
+        else if (!strcmp(k, "device_count")) {
             if (parse_u64(val, &u) || u > GC_MAX_DEVICES) { rc = GC_EINVAL; goto fail; }
             m->device_count = (uint32_t)u;
         }
-        else if (!strcmp(key, "device")) {
+        else if (!strcmp(k, "device")) {
             unsigned d; unsigned long long sz; int ord; char uuid[GC_UUID_LEN];
             if (sscanf(val, "%u size %llu ordinal %d uuid %71s", &d, &sz, &ord, uuid) != 4 ||
                 d >= m->device_count || !m->chunk_size) { rc = GC_EINVAL; goto fail; }
@@ -214,14 +213,14 @@ int gc_manifest_load(gc_repo *r, const char *id, gc_manifest **out)
             m->dev[d].ordinal = ord;
             if (strcmp(uuid, "-")) snprintf(m->dev[d].uuid, sizeof m->dev[d].uuid, "%s", uuid);
         }
-        else if (!strcmp(key, "c")) {
+        else if (!strcmp(k, "c")) {
             unsigned d; char hex[GC_HEX_LEN + 1];
             if (sscanf(val, "%u %64s", &d, hex) != 2 || d >= m->device_count || !m->dev[d].hashes ||
                 next_chunk[d] >= m->dev[d].nchunks) { rc = GC_EINVAL; goto fail; }
             if (gc_unhex(hex, m->dev[d].hashes[next_chunk[d]], GC_HASH_LEN)) { rc = GC_EINVAL; goto fail; }
             next_chunk[d]++;
         }
-        else if (!strcmp(key, "stat")) {
+        else if (!strcmp(k, "stat")) {
             char name[64]; unsigned long long v;
             if (sscanf(val, "%63s %llu", name, &v) != 2) { rc = GC_EINVAL; goto fail; }
 #define X(f) if (!strcmp(name, #f)) m->stats.f = v; else
@@ -229,7 +228,7 @@ int gc_manifest_load(gc_repo *r, const char *id, gc_manifest **out)
 #undef X
             if (!strcmp(name, "threads")) m->stats.threads = (int)v;
         }
-        else if (!strcmp(key, "end")) { break; }
+        else if (!strcmp(k, "end")) { break; }
         else { /* unknown keys are ignored for forward compatibility */ }
     }
     for (uint32_t d = 0; d < m->device_count; d++)

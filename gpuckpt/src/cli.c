@@ -5,13 +5,14 @@
 static const char *USAGE =
 "gpuckpt " GC_VERSION " -- incremental, deduplicated GPU checkpoint storage\n"
 "\n"
-"Repository\n"
+"Repository (R is a directory or s3://bucket[/prefix]; see docs/s3.md)\n"
 "  init     --repo R [--chunk-size BYTES]        create a chunk store (default 1 MiB chunks)\n"
 "  list     --repo R                             list snapshot ids\n"
 "  show     --repo R --snapshot ID [--chunks]    print a manifest\n"
 "  verify   --repo R [--snapshot ID]             re-hash every chunk of one or all snapshots\n"
 "  forget   --repo R --snapshot ID               drop a manifest (chunks stay until gc)\n"
-"  gc       --repo R                             delete chunks no manifest references\n"
+"  gc       --repo R [--grace-seconds N]         delete chunks no manifest references\n"
+"           (s3: unreferenced chunks younger than N seconds are kept, default 3600)\n"
 "\n"
 "Host-file images (tests, benchmarks, images already on disk)\n"
 "  snapshot-file --repo R --input F[,F...] [--id ID] [--parent ID] [--threads N] [--note TEXT]\n"
@@ -38,7 +39,7 @@ static const char *USAGE =
 
 typedef struct {
     const char *repo, *snapshot, *id, *parent, *input, *output, *note, *libcuda;
-    int pid, threads, resume, no_unlock, complete_on_error, chunks;
+    int pid, threads, resume, no_unlock, complete_on_error, chunks, grace_seconds;
     unsigned timeout_ms;
     uint64_t chunk_size;
 } opts;
@@ -48,6 +49,7 @@ static int parse(int argc, char **argv, opts *o)
     memset(o, 0, sizeof *o);
     o->chunk_size = 1u << 20;
     o->timeout_ms = 30000;
+    o->grace_seconds = -1;
     for (int i = 2; i < argc; i++) {
         const char *a = argv[i];
         const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -58,6 +60,7 @@ static int parse(int argc, char **argv, opts *o)
         TAKEI("--pid", pid, atoi(v)) TAKEI("--threads", threads, atoi(v))
         TAKEI("--timeout-ms", timeout_ms, (unsigned)strtoul(v, NULL, 10))
         TAKEI("--chunk-size", chunk_size, strtoull(v, NULL, 10))
+        TAKEI("--grace-seconds", grace_seconds, atoi(v))
 #undef TAKE
 #undef TAKEI
         if (!strcmp(a, "--resume")) { o->resume = 1; continue; }
@@ -196,6 +199,7 @@ static int cmd_gc(const opts *o)
 {
     gc_repo *r; int rc = open_repo(o, &r); if (rc) return rc;
     uint64_t n = 0, b = 0;
+    if (o->grace_seconds >= 0) gc_repo_set_gc_grace(r, o->grace_seconds);
     rc = gc_repo_gc(r, &n, &b);
     gc_repo_close(r);
     if (rc) return fail("gc", rc);
@@ -447,8 +451,8 @@ int main(int argc, char **argv)
     }
     const char *cmd = argv[1];
     if (!strcmp(cmd, "version")) {
-        printf("gpuckpt %s\nhash: sha256 (%s)\ncuda-header: %s\nformat: %d\n", GC_VERSION, gc_sha256_impl(),
-               gc_cuda_header_mode(), GC_FORMAT_VERSION);
+        printf("gpuckpt %s\nhash: sha256 (%s)\ncuda-header: %s\ns3: %s\nformat: %d\n", GC_VERSION, gc_sha256_impl(),
+               gc_cuda_header_mode(), gc_s3_backend(), GC_FORMAT_VERSION);
         return 0;
     }
     opts o;

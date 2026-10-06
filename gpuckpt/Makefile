@@ -2,7 +2,7 @@
 # CUDA checkpoint custom-storage interface.
 #
 # Build targets
-#   make            build/gpuckpt (CLI) + build/libgpuckpt.a
+#   make            build/gpuckpt (CLI) + build/libgpuckpt.a (+ mock driver, signer test)
 #   make test       CPU-only test suite (host-image backend + mock libcuda)
 #   make bench      synthetic CPU-only benchmark of the storage layer
 #   make clean
@@ -36,11 +36,17 @@ ifeq ($(shell $(PKG_CONFIG) --exists libcrypto && echo yes),yes)
   LDLIBS += $(shell $(PKG_CONFIG) --libs libcrypto)
 endif
 
+# S3 backend: needs libcurl. Without it the binary builds and refuses s3:// repos.
+ifeq ($(shell $(PKG_CONFIG) --exists libcurl && echo yes),yes)
+  override CFLAGS += -DGC_USE_CURL $(shell $(PKG_CONFIG) --cflags libcurl)
+  LDLIBS += $(shell $(PKG_CONFIG) --libs libcurl)
+endif
+
 B := build
-LIB_SRCS := src/sha256.c src/store.c src/manifest.c src/image_file.c src/snapshot.c src/util.c src/cuda_backend.c
+LIB_SRCS := src/sha256.c src/store.c src/manifest.c src/image_file.c src/snapshot.c src/util.c src/objstore.c src/s3.c src/cuda_backend.c
 LIB_OBJS := $(patsubst src/%.c,$(B)/%.o,$(LIB_SRCS))
 
-all: $(B)/gpuckpt $(B)/libgpuckpt.a $(B)/libcuda_mock.so
+all: $(B)/gpuckpt $(B)/libgpuckpt.a $(B)/libcuda_mock.so $(B)/sigv4_test
 	@echo "built: cuda-header=$(CUDA_HDR)"
 
 $(B):
@@ -64,7 +70,10 @@ $(B)/gpuckpt: src/cli.c $(B)/libgpuckpt.a
 $(B)/libcuda_mock.so: tests/mock/libcuda_mock.c tests/mock/cuda.h | $(B)
 	$(CC) $(CFLAGS) -Wno-missing-prototypes -Itests/mock -shared -fPIC -o $@ $<
 
-test: all $(B)/libcuda_mock.so
+$(B)/sigv4_test: tests/sigv4_test.c $(B)/libgpuckpt.a
+	$(CC) $(CFLAGS) -o $@ tests/sigv4_test.c $(B)/libgpuckpt.a $(LDFLAGS) $(LDLIBS)
+
+test: all $(B)/libcuda_mock.so $(B)/sigv4_test
 	bash tests/run.sh
 
 bench: all
