@@ -32,6 +32,17 @@ static const char *USAGE =
 "           target must be CHECKPOINTED; refills GPU memory, completes, unlocks.\n"
 "  restore-tid --pid P                           driver restore thread id (for CRIU integration)\n"
 "\n"
+"\n"
+"Data-path options (snapshot, restore, snapshot-file, restore-file; docs/performance.md)\n"
+"  --hostmem malloc|thp|hugetlb|hugetlb1g   staging memory backing (default thp)\n"
+"  --mlock                                  mlock(2) the staging arena\n"
+"  --pin register|alloc|none                page-lock staging for DMA (default register)\n"
+"  --pipeline N                             staging slots per worker, 1-4 (default 2: copy overlaps hashing)\n"
+"  --gpu-hash on|off                        hash chunks on the GPU, copy only new ones (default off)\n"
+"  --gpu-hash-check N                       chunks re-hashed on the CPU to cross-check (default 8)\n"
+"  --gds on|off                             GPUDirect Storage: no host copy at all; needs --gpu-hash\n"
+"                                           and a local repo (default off)\n"
+"\n"
 "  version                                       build info (hash impl, cuda header mode)\n"
 "\n"
 "Environment: GPUCKPT_LIBCUDA  path to libcuda (default libcuda.so.1)\n"
@@ -42,7 +53,15 @@ typedef struct {
     int pid, threads, resume, no_unlock, complete_on_error, chunks, grace_seconds;
     unsigned timeout_ms;
     uint64_t chunk_size;
+    gc_io_opts io;
 } opts;
+
+static int parse_choice(const char *flag, const char *v, const char *const *names, const int *vals, int n, int *out)
+{
+    for (int i = 0; i < n; i++) if (!strcmp(v, names[i])) { *out = vals[i]; return 0; }
+    fprintf(stderr, "%s: unknown value %s\n", flag, v);
+    return 1;
+}
 
 static int parse(int argc, char **argv, opts *o)
 {
@@ -50,6 +69,13 @@ static int parse(int argc, char **argv, opts *o)
     o->chunk_size = 1u << 20;
     o->timeout_ms = 30000;
     o->grace_seconds = -1;
+    gc_io_opts_default(&o->io);
+    static const char *const hm_n[] = {"malloc", "thp", "hugetlb", "hugetlb1g"};
+    static const int hm_v[] = {GC_HOSTMEM_MALLOC, GC_HOSTMEM_THP, GC_HOSTMEM_HUGETLB, GC_HOSTMEM_HUGETLB_1G};
+    static const char *const pin_n[] = {"register", "alloc", "none"};
+    static const int pin_v[] = {GC_PIN_REGISTER, GC_PIN_ALLOC, GC_PIN_NONE};
+    static const char *const onoff_n[] = {"on", "off"};
+    static const int onoff_v[] = {GC_ON, GC_OFF};
     for (int i = 2; i < argc; i++) {
         const char *a = argv[i];
         const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -63,6 +89,25 @@ static int parse(int argc, char **argv, opts *o)
         TAKEI("--grace-seconds", grace_seconds, atoi(v))
 #undef TAKE
 #undef TAKEI
+        if (!strcmp(a, "--hostmem") || !strcmp(a, "--pin") || !strcmp(a, "--gpu-hash") || !strcmp(a, "--gds")) {
+            if (!v) { fprintf(stderr, "%s needs a value\n", a); return 1; }
+            int bad = !strcmp(a, "--hostmem") ? parse_choice(a, v, hm_n, hm_v, 4, &o->io.hostmem)
+                    : !strcmp(a, "--pin") ? parse_choice(a, v, pin_n, pin_v, 3, &o->io.pin)
+                    : !strcmp(a, "--gpu-hash") ? parse_choice(a, v, onoff_n, onoff_v, 2, &o->io.gpu_hash)
+                    : parse_choice(a, v, onoff_n, onoff_v, 2, &o->io.gds);
+            if (bad) return 1;
+            i++;
+            continue;
+        }
+        if (!strcmp(a, "--pipeline") || !strcmp(a, "--gpu-hash-check")) {
+            if (!v) { fprintf(stderr, "%s needs a value\n", a); return 1; }
+            int n = atoi(v);
+            if (!strcmp(a, "--pipeline")) { if (n < 1 || n > 4) { fprintf(stderr, "--pipeline must be 1-4\n"); return 1; } o->io.pipeline = n; }
+            else { if (n < 0) { fprintf(stderr, "--gpu-hash-check must be >= 0\n"); return 1; } o->io.gpu_hash_check = n; }
+            i++;
+            continue;
+        }
+        if (!strcmp(a, "--mlock")) { o->io.mlock = 1; continue; }
         if (!strcmp(a, "--resume")) { o->resume = 1; continue; }
         if (!strcmp(a, "--no-unlock")) { o->no_unlock = 1; continue; }
         if (!strcmp(a, "--complete-on-error")) { o->complete_on_error = 1; continue; }
@@ -102,11 +147,26 @@ static void print_stats(const char *prefix, const gc_stats *s)
     printf("%sns_read_sum=%llu\n", prefix, (unsigned long long)s->ns_read);
     printf("%sns_hash_sum=%llu\n", prefix, (unsigned long long)s->ns_hash);
     printf("%sns_write_sum=%llu\n", prefix, (unsigned long long)s->ns_write);
+    printf("%sbytes_staged=%llu\n", prefix, (unsigned long long)s->bytes_staged);
+    printf("%sbytes_direct=%llu\n", prefix, (unsigned long long)s->bytes_direct);
+    printf("%sns_gpu_hash=%llu\n", prefix, (unsigned long long)s->ns_gpu_hash);
+    printf("%schunks_cpu_checked=%llu\n", prefix, (unsigned long long)s->chunks_cpu_checked);
+    printf("%shostmem_huge_kb=%llu\n", prefix, (unsigned long long)s->hostmem_huge_kb);
     double wall_s = (double)s->ns_wall / 1e9;
     if (wall_s > 0)
         printf("%sthroughput_MiB_s=%.1f\n", prefix, (double)s->bytes_total / 1048576.0 / wall_s);
     if (s->bytes_total)
         printf("%snew_fraction=%.4f\n", prefix, (double)s->bytes_new / (double)s->bytes_total);
+}
+
+static void print_report(const char *prefix, const gc_io_report *r)
+{
+    if (r->hostmem[0]) printf("%sio.hostmem=%s\n", prefix, r->hostmem);
+    if (r->mlock[0]) printf("%sio.mlock=%s\n", prefix, r->mlock);
+    if (r->pin[0]) printf("%sio.pin=%s\n", prefix, r->pin);
+    if (r->pipeline[0]) printf("%sio.pipeline=%s\n", prefix, r->pipeline);
+    if (r->gpu_hash[0]) printf("%sio.gpu_hash=%s\n", prefix, r->gpu_hash);
+    if (r->gds[0]) printf("%sio.gds=%s\n", prefix, r->gds);
 }
 
 static int split_paths(const char *list, const char **out, int max)
@@ -118,6 +178,8 @@ static int split_paths(const char *list, const char **out, int max)
     for (char *t = strtok_r(buf, ",", &save); t && n < max; t = strtok_r(NULL, ",", &save)) out[n++] = t;
     return n;
 }
+
+const char *gc_cufile_header_mode(void);
 
 static int list_cb(const char *id, void *u) { (void)u; printf("%s\n", id); return 0; }
 
@@ -216,7 +278,9 @@ static int cmd_snapshot_file(const opts *o)
     gc_image img;
     rc = gc_image_file_open(&img, "r", (uint32_t)n, paths, NULL);
     if (rc) { gc_repo_close(r); return fail("open input", rc); }
-    gc_snapshot_opts so = { .id = o->id, .parent = o->parent, .pid = o->pid, .threads = o->threads, .note = o->note };
+    gc_io_report rep;
+    gc_snapshot_opts so = { .id = o->id, .parent = o->parent, .pid = o->pid, .threads = o->threads, .note = o->note,
+                            .io = &o->io, .report = &rep };
     gc_stats st = {0};
     char id[GC_ID_LEN];
     rc = gc_snapshot_create(r, &img, &so, &st, id);
@@ -225,6 +289,7 @@ static int cmd_snapshot_file(const opts *o)
     if (rc) return fail("snapshot", rc);
     printf("snapshot=%s\n", id);
     print_stats("", &st);
+    print_report("", &rep);
     return 0;
 }
 
@@ -248,12 +313,15 @@ static int cmd_restore_file(const opts *o)
     rc = gc_image_file_open(&img, "w", (uint32_t)n, paths, sizes);
     if (rc) { gc_repo_close(r); return fail("open output", rc); }
     gc_stats st = {0};
-    rc = gc_snapshot_restore(r, o->snapshot, &img, o->threads, &st);
+    gc_io_report rep;
+    gc_restore_opts ro = { .threads = o->threads, .io = &o->io, .report = &rep };
+    rc = gc_snapshot_restore(r, o->snapshot, &img, &ro, &st);
     gc_image_file_close(&img);
     gc_repo_close(r);
     if (rc) return fail("restore", rc);
     printf("restored=%s\n", o->snapshot);
     print_stats("", &st);
+    print_report("", &rep);
     return 0;
 }
 
@@ -264,6 +332,21 @@ static int open_cuda(const opts *o, gc_cuda **c)
     int rc = gc_cuda_open(c, o->libcuda);
     if (rc) return fail("open CUDA driver", rc);
     return 0;
+}
+
+/* Turn on the requested accelerations before the operation begins. A
+ * failure is reported and the operation proceeds without it. */
+static void enable_accel(const opts *o, gc_cuda *c)
+{
+    char why[512];
+    if (o->io.gpu_hash == GC_ON) {
+        why[0] = 0;
+        if (gc_cuda_enable_gpu_hash(c, why, sizeof why)) fprintf(stderr, "warning: --gpu-hash unavailable: %s\n", why);
+    }
+    if (o->io.gds == GC_ON) {
+        why[0] = 0;
+        if (gc_cuda_enable_gds(c, why, sizeof why)) fprintf(stderr, "warning: --gds unavailable: %s\n", why);
+    }
 }
 
 static int report_state(gc_cuda *c, int pid)
@@ -309,15 +392,17 @@ static int cmd_restore_tid(const opts *o)
 
 /* Restore a CHECKPOINTED target from snapshot id; on success target is
  * LOCKED (or RUNNING if unlock). Shared by `restore` and `snapshot --resume`. */
-static int do_restore(gc_cuda *c, gc_repo *r, const opts *o, const char *id, int unlock)
+static int do_restore(gc_cuda *c, gc_repo *r, const opts *o, const char *id, int unlock, gc_staging *stg)
 {
     gc_image img;
     int rc = gc_cuda_restore_begin(c, o->pid, &img);
     if (rc) return fail("restore begin", rc);
     printf("restore: mapped %u device image(s) for refill\n", img.device_count);
     gc_stats st = {0};
+    gc_io_report rep;
+    gc_restore_opts ro = { .threads = o->threads, .io = &o->io, .report = &rep, .staging = stg };
     uint64_t t0 = gc_mono_ns();
-    rc = gc_snapshot_restore(r, id, &img, o->threads, &st);
+    rc = gc_snapshot_restore(r, id, &img, &ro, &st);
     if (rc) {
         fail("restore copy", rc);
         fprintf(stderr, "target pid %d is RESTORING with a partially filled image; operation NOT completed\n", o->pid);
@@ -334,6 +419,7 @@ static int do_restore(gc_cuda *c, gc_repo *r, const opts *o, const char *id, int
     gc_cuda_image_close(c, &img);
     if (rc) { fail("restore complete", rc); return 3; }
     print_stats("restore.", &st);
+    print_report("restore.", &rep);
     printf("restore.ns_copy=%llu\nrestore.ns_complete=%llu\n", (unsigned long long)(t1 - t0), (unsigned long long)(t2 - t1));
     if (unlock) {
         rc = gc_cuda_unlock(c, o->pid);
@@ -342,12 +428,34 @@ static int do_restore(gc_cuda *c, gc_repo *r, const opts *o, const char *id, int
     return 0;
 }
 
+/* Allocate, pre-fault and pin the staging arena before the target is
+ * locked, so none of that cost lands inside the checkpoint pause. */
+static gc_staging *prepare_staging(const opts *o, gc_cuda *c, gc_repo *r, gc_image *pin, const char *prefix)
+{
+    gc_staging *stg = NULL;
+    uint64_t ns = 0;
+    gc_io_report rep;
+    memset(&rep, 0, sizeof rep);
+    if (gc_cuda_pinning_image(c, pin) != GC_OK) return NULL;
+    size_t bytes = gc_staging_bytes(r, o->threads, &o->io);
+    if (gc_staging_create(&stg, bytes, &o->io, pin, &rep, &ns) != GC_OK) {
+        fprintf(stderr, "warning: staging arena not prepared ahead (%s); the operation will allocate its own\n", gc_last_error());
+        return NULL;
+    }
+    printf("%sns_staging_setup=%llu\n%sstaging_bytes=%zu\n", prefix, (unsigned long long)ns, prefix, bytes);
+    return stg;
+}
+
 static int cmd_snapshot(const opts *o)
 {
     if (!o->pid) { fprintf(stderr, "missing --pid\n"); return 1; }
     if (o->pid == getpid()) { fprintf(stderr, "custom-storage checkpoint of the calling process is not supported\n"); return 1; }
     gc_repo *r; int rc = open_repo(o, &r); if (rc) return rc;
     gc_cuda *c; rc = open_cuda(o, &c); if (rc) { gc_repo_close(r); return rc; }
+    enable_accel(o, c);
+    gc_image pin;
+    memset(&pin, 0, sizeof pin);
+    gc_staging *stg = prepare_staging(o, c, r, &pin, "checkpoint.");
 
     int st = GC_PS_UNKNOWN, we_locked = 0, ret = 0;
     rc = gc_cuda_get_state(c, o->pid, &st);
@@ -379,7 +487,9 @@ static int cmd_snapshot(const opts *o)
         printf("  device %u size=%llu ordinal=%d uuid=%s\n", i, (unsigned long long)img.dev[i].size,
                img.dev[i].ordinal, img.dev[i].uuid);
 
-    gc_snapshot_opts so = { .id = o->id, .parent = o->parent, .pid = o->pid, .threads = o->threads, .note = o->note };
+    gc_io_report rep;
+    gc_snapshot_opts so = { .id = o->id, .parent = o->parent, .pid = o->pid, .threads = o->threads, .note = o->note,
+                            .io = &o->io, .report = &rep, .staging = stg };
     gc_stats cst = {0};
     char id[GC_ID_LEN] = "";
     uint64_t t_copy0 = gc_mono_ns();
@@ -407,16 +517,19 @@ static int cmd_snapshot(const opts *o)
     }
     printf("snapshot=%s\n", id);
     print_stats("checkpoint.", &cst);
+    print_report("checkpoint.", &rep);
     printf("checkpoint.ns_lock=%llu\ncheckpoint.ns_map=%llu\ncheckpoint.ns_copy=%llu\ncheckpoint.ns_complete=%llu\n",
            (unsigned long long)(t_lock1 - t_lock0), (unsigned long long)(t_map1 - t_map0),
            (unsigned long long)(t_copy1 - t_copy0), (unsigned long long)(t_cpl1 - t_cpl0));
 
     if (o->resume) {
-        ret = do_restore(c, r, o, id, 1);
+        ret = do_restore(c, r, o, id, 1, stg);
         if (ret == 0) printf("resume.ns_total=%llu\n", (unsigned long long)(gc_mono_ns() - t_cpl1));
     }
     if (ret == 0) ret = report_state(c, o->pid);
 out:
+    gc_staging_destroy(stg);
+    gc_cuda_image_close(c, &pin);
     gc_cuda_close(c);
     gc_repo_close(r);
     return ret;
@@ -428,6 +541,10 @@ static int cmd_restore(const opts *o)
     if (need(o, "--snapshot", o->snapshot)) return 1;
     gc_repo *r; int rc = open_repo(o, &r); if (rc) return rc;
     gc_cuda *c; rc = open_cuda(o, &c); if (rc) { gc_repo_close(r); return rc; }
+    enable_accel(o, c);
+    gc_image pin;
+    memset(&pin, 0, sizeof pin);
+    gc_staging *stg = prepare_staging(o, c, r, &pin, "restore.");
     int st = GC_PS_UNKNOWN, ret;
     rc = gc_cuda_get_state(c, o->pid, &st);
     if (rc) { ret = fail("get state", rc); goto out; }
@@ -435,9 +552,11 @@ static int cmd_restore(const opts *o)
         fprintf(stderr, "error: target pid %d is %s; restore needs CHECKPOINTED\n", o->pid, gc_proc_state_name(st));
         ret = 2; goto out;
     }
-    ret = do_restore(c, r, o, o->snapshot, !o->no_unlock);
+    ret = do_restore(c, r, o, o->snapshot, !o->no_unlock, stg);
     if (ret == 0) { printf("restored=%s\n", o->snapshot); ret = report_state(c, o->pid); }
 out:
+    gc_staging_destroy(stg);
+    gc_cuda_image_close(c, &pin);
     gc_cuda_close(c);
     gc_repo_close(r);
     return ret;
@@ -451,8 +570,8 @@ int main(int argc, char **argv)
     }
     const char *cmd = argv[1];
     if (!strcmp(cmd, "version")) {
-        printf("gpuckpt %s\nhash: sha256 (%s)\ncuda-header: %s\ns3: %s\nformat: %d\n", GC_VERSION, gc_sha256_impl(),
-               gc_cuda_header_mode(), gc_s3_backend(), GC_FORMAT_VERSION);
+        printf("gpuckpt %s\nhash: sha256 (%s)\ncuda-header: %s\ncufile-header: %s\ns3: %s\nformat: %d\n", GC_VERSION,
+               gc_sha256_impl(), gc_cuda_header_mode(), gc_cufile_header_mode(), gc_s3_backend(), GC_FORMAT_VERSION);
         return 0;
     }
     opts o;
