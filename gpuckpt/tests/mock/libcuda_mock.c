@@ -53,8 +53,12 @@
 
 #include "kernels/sha256_chunks.cu"
 
-/* ---- accounting ---- */
+/* ---- accounting ----
+ * Worker threads copy concurrently, so every counter update is atomic;
+ * plain increments lose updates under contention and the tests compare
+ * these counts exactly. */
 static unsigned long long c_dtoh, c_htod, c_async, c_launch, c_streams, c_register, c_register_bytes, c_alloc_host;
+#define CADD(var, n) __atomic_fetch_add(&(var), (unsigned long long)(n), __ATOMIC_RELAXED)
 
 __attribute__((destructor)) static void dump_counters(void)
 {
@@ -217,13 +221,13 @@ CUresult cuDevicePrimaryCtxRetain(CUcontext *c, CUdevice d) { *c = (CUcontext)(u
 CUresult cuDevicePrimaryCtxRelease_v2(CUdevice d) { (void)d; return CUDA_SUCCESS; }
 CUresult cuCtxSetCurrent(CUcontext c) { (void)c; return CUDA_SUCCESS; }
 CUresult cuStreamSynchronize(CUstream s) { (void)s; return CUDA_SUCCESS; }
-CUresult cuMemHostAlloc(void **p, size_t n, unsigned flags) { (void)flags; *p = malloc(n); c_alloc_host += n; return *p ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY; }
+CUresult cuMemHostAlloc(void **p, size_t n, unsigned flags) { (void)flags; *p = malloc(n); CADD(c_alloc_host, n); return *p ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY; }
 CUresult cuMemHostRegister_v2(void *p, size_t n, unsigned flags)
 {
     (void)flags;
     if (getenv("GPUCKPT_MOCK_REGISTER_FAIL")) return CUDA_ERROR_NOT_SUPPORTED;
     if (!p || !n) return CUDA_ERROR_INVALID_VALUE;
-    c_register++; c_register_bytes += n;
+    CADD(c_register, 1); CADD(c_register_bytes, n);
     return CUDA_SUCCESS;
 }
 CUresult cuMemHostUnregister(void *p) { return p ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE; }
@@ -234,7 +238,14 @@ CUresult cuDeviceGetAttribute(int *v, CUdevice_attribute a, CUdevice d)
     if (a == CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR) { *v = 0; return CUDA_SUCCESS; }
     return CUDA_ERROR_INVALID_VALUE;
 }
-CUresult cuStreamCreate(CUstream *s, unsigned flags) { (void)flags; static long n; *s = (CUstream)(long)(++n); c_streams++; return CUDA_SUCCESS; }
+CUresult cuStreamCreate(CUstream *s, unsigned flags)
+{
+    (void)flags;
+    static long n;
+    *s = (CUstream)(__atomic_add_fetch(&n, 1, __ATOMIC_RELAXED));
+    CADD(c_streams, 1);
+    return CUDA_SUCCESS;
+}
 CUresult cuStreamDestroy_v2(CUstream s) { (void)s; return CUDA_SUCCESS; }
 CUresult cuMemAlloc_v2(CUdeviceptr *p, size_t n)
 {
@@ -298,7 +309,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned gx, unsigned gy, unsigned gz, uns
 {
     (void)f; (void)shmem; (void)s; (void)extra;
     if (gy != 1 || gz != 1 || by != 1 || bz != 1 || !params) return CUDA_ERROR_INVALID_VALUE;
-    c_launch++;
+    CADD(c_launch, 1);
     CUdeviceptr base = *(CUdeviceptr *)params[0];
     uint64_t size = *(uint64_t *)params[1], cs = *(uint64_t *)params[2], n = *(uint64_t *)params[3];
     CUdeviceptr out = *(CUdeviceptr *)params[4];
@@ -317,14 +328,14 @@ CUresult cuMemcpyDtoH_v2(void *dst, CUdeviceptr src, size_t n)
 {
     if (find_dev(src, n) < 0 && find_alloc(src, n) < 0) return CUDA_ERROR_INVALID_VALUE;
     memcpy(dst, (void *)(uintptr_t)src, n);
-    c_dtoh += n;
+    CADD(c_dtoh, n);
     return CUDA_SUCCESS;
 }
 CUresult cuMemcpyHtoD_v2(CUdeviceptr dst, const void *src, size_t n)
 {
     if (find_dev(dst, n) < 0 && find_alloc(dst, n) < 0) return CUDA_ERROR_INVALID_VALUE;
     memcpy((void *)(uintptr_t)dst, src, n);
-    c_htod += n;
+    CADD(c_htod, n);
     return CUDA_SUCCESS;
 }
 /* Async copies complete immediately in the mock; ordering is the caller's
@@ -333,13 +344,13 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr dst, const void *src, size_t n)
 CUresult cuMemcpyDtoHAsync_v2(void *dst, CUdeviceptr src, size_t n, CUstream s)
 {
     if (!s) return CUDA_ERROR_INVALID_VALUE;
-    c_async++;
+    CADD(c_async, 1);
     return cuMemcpyDtoH_v2(dst, src, n);
 }
 CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dst, const void *src, size_t n, CUstream s)
 {
     if (!s) return CUDA_ERROR_INVALID_VALUE;
-    c_async++;
+    CADD(c_async, 1);
     return cuMemcpyHtoD_v2(dst, src, n);
 }
 CUresult cuPointerGetAttribute(void *out, CUpointer_attribute a, CUdeviceptr p)
