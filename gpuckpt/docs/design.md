@@ -51,10 +51,13 @@ the default.
 
 ```
 gpuckpt snapshot --pid P [--resume]
+  staging arena                  allocate, pre-fault, cuMemHostRegister (before the pause)
   state(P)                       must be RUNNING or LOCKED
   lock(P, timeout)               if RUNNING
   checkpoint(P, custom)          LOCKED -> CHECKPOINTING; GPU memory mapped into us
-  for each chunk, N threads:     cuMemcpyDtoH -> sha256 -> store_put if absent
+  [--gpu-hash] kernel            digests of every chunk, computed in place; CPU cross-check sample
+  for each chunk, N threads:     default: async DtoH (2 slots) -> sha256 -> store_put if absent
+                                 --gpu-hash: skip if stored, else stage (or cuFileWrite with --gds)
   manifest_save                  only after every chunk is in the store
   complete(handle)               CHECKPOINTING -> CHECKPOINTED; GPU memory released
   [--resume]
@@ -108,7 +111,9 @@ include GPU-to-host copy bandwidth, the driver's mapping time, pinned
 memory effects, or the driver's own work in `complete`. On the CUDA path
 these dominate for large images and are reported by the CLI per run.
 
+Data-path options are described in `docs/performance.md`.
+
 ## Not implemented (plan step 6)
 
-GPUDirect Storage, remote replication, application-assisted dirty
-tracking, and multi-snapshot retention policies beyond `forget` + `gc`.
+Application-assisted dirty tracking, and multi-snapshot retention policies
+beyond `forget` + `gc`.

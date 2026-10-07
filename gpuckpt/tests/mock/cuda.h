@@ -20,14 +20,19 @@ typedef enum cudaError_enum {
     CUDA_ERROR_OUT_OF_MEMORY = 2,
     CUDA_ERROR_NOT_INITIALIZED = 3,
     CUDA_ERROR_INVALID_DEVICE = 101,
+    CUDA_ERROR_INVALID_IMAGE = 200,
+    CUDA_ERROR_NOT_FOUND = 500,
     CUDA_ERROR_INVALID_HANDLE = 400,
     CUDA_ERROR_ILLEGAL_STATE = 401,
+    CUDA_ERROR_ILLEGAL_ADDRESS = 700,
     CUDA_ERROR_NOT_SUPPORTED = 801,
     CUDA_ERROR_TIMEOUT = 909,
     CUDA_ERROR_UNKNOWN = 999
 } CUresult;
 
 typedef int CUdevice;
+typedef struct CUmod_st *CUmodule;
+typedef struct CUfunc_st *CUfunction;
 typedef struct CUctx_st *CUcontext;
 typedef struct CUstream_st *CUstream;
 typedef unsigned long long CUdeviceptr;
@@ -43,6 +48,13 @@ typedef enum CUpointer_attribute_enum {
 } CUpointer_attribute;
 
 #define CU_MEMHOSTALLOC_PORTABLE 0x01
+#define CU_MEMHOSTREGISTER_PORTABLE 0x01
+#define CU_STREAM_NON_BLOCKING 0x1
+
+typedef enum CUdevice_attribute_enum {
+    CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75,
+    CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76
+} CUdevice_attribute;
 
 typedef enum CUprocessState_enum {
     CU_PROCESS_STATE_RUNNING = 0,

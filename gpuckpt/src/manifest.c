@@ -80,7 +80,8 @@ static int sb_printf(sbuf *b, const char *fmt, ...)
 
 #define STAT_FIELDS(X) \
     X(bytes_total) X(chunks_total) X(chunks_new) X(bytes_new) X(chunks_same_as_parent) \
-    X(chunks_missing) X(chunks_corrupt) X(ns_read) X(ns_hash) X(ns_write) X(ns_wall)
+    X(chunks_missing) X(chunks_corrupt) X(ns_read) X(ns_hash) X(ns_write) X(ns_wall) \
+    X(bytes_staged) X(bytes_direct) X(ns_gpu_hash) X(chunks_cpu_checked) X(hostmem_huge_kb)
 
 static int serialize(const gc_manifest *m, sbuf *b)
 {

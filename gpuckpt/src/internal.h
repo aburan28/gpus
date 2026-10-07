@@ -53,6 +53,9 @@ int gc_store_has(gc_repo *r, const uint8_t *hash);
 int gc_store_put(gc_repo *r, const uint8_t *hash, const void *data, size_t len, int *was_new);
 int gc_store_get(gc_repo *r, const uint8_t *hash, void *buf, size_t buflen, size_t *len_out, int verify);
 int gc_store_delete(gc_repo *r, const uint8_t *hash, uint64_t *bytes);
+int gc_store_put_direct(gc_repo *r, const uint8_t *hash, uint64_t len, int odirect,
+                        int (*fill)(int fd, void *u), void *u, int *was_new, int *odirect_used);
+int gc_store_open_chunk(gc_repo *r, const uint8_t *hash, int odirect, int *fd, uint64_t *size, int *odirect_used);
 
 /* manifest.c */
 int gc_manifest_key(const char *id, char *out, size_t outlen);           /* "snapshots/<id>.manifest" */

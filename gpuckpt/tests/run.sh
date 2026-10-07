@@ -18,6 +18,9 @@ stat_of(){ grep "^$2=" "$1" | cut -d= -f2; }
 
 echo "== build info"; $BIN version
 
+echo "== GPU SHA-256 kernel (compiled as C) vs library SHA-256"
+./build/kernel_test >"$T/kt.out" 2>&1 && ok "$(cat $T/kt.out)" || { bad "kernel_test"; cat "$T/kt.out"; }
+
 echo "== sha256 known vector"
 python3 - "$T" <<'PY'
 import sys, hashlib, os
@@ -239,6 +242,7 @@ rm -rf "$T/mock"; GPUCKPT_MOCK_IMAGES="$T/dev0.orig" $BIN snapshot --repo "$T/cr
 rc=0; GPUCKPT_MOCK_IMAGES="$T/dev0.orig" $BIN restore --repo "$T/crepo" --pid 7 --snapshot g1 > "$T/mm.out" 2>&1 || rc=$?
 [ $rc = 3 ] && grep -q "devices" "$T/mm.out" && ok "shape mismatch refused before any copy (exit 3, target left RESTORING)" || { bad "mismatch rc=$rc"; cat "$T/mm.out"; }
 
+source tests/accel_tests.sh
 source tests/s3_tests.sh
 
 echo

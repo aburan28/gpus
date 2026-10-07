@@ -22,7 +22,7 @@ driver. The open hardware questions are tracked in [docs/gates.md](docs/gates.md
 
 ```sh
 make                 # build/gpuckpt, build/libgpuckpt.a, build/libcuda_mock.so
-make test            # 106 CPU-only checks (host files, mock driver, mock S3 endpoint)
+make test            # 172 CPU-only checks (host files, mock driver/NVRTC/cuFile, mock S3)
 make bench           # synthetic storage-layer benchmark
 CUDA_HOME=/usr/local/cuda make   # on a CUDA host: real header, binary reports cuda-header: real
 ```
@@ -67,6 +67,27 @@ gpuckpt snapshot-file --repo R --input dev0.bin,dev1.bin
 gpuckpt restore-file  --repo R --snapshot ID --output out0.bin,out1.bin
 ```
 
+Data-path options (details and the open hardware questions in
+[docs/performance.md](docs/performance.md)):
+
+```sh
+# defaults: THP-backed, pre-faulted, CUDA-pinned staging prepared before the
+# pause, two async copy slots per worker
+gpuckpt snapshot --repo /ckpt/store --pid 12345 --resume
+
+# hash on the GPU; only changed chunks cross PCIe
+gpuckpt snapshot --repo /ckpt/store --pid 12345 --resume --gpu-hash on
+
+# GPUDirect Storage: chunk bytes never enter host memory
+gpuckpt snapshot --repo /ckpt/nvme --pid 12345 --gpu-hash on --gds on
+
+# 1 GiB hugetlb pages, mlock, deeper pipeline
+gpuckpt snapshot --repo /ckpt/store --pid 12345 --hostmem hugetlb1g --mlock --pipeline 4
+```
+
+`--gpu-hash` and `--gds` default to off until gates 7 and 4 are verified on
+hardware. Every option reports what it actually obtained in an `io.*=` line.
+
 Every command prints `key=value` statistics: bytes and chunks seen, chunks
 and bytes newly stored, chunks identical to the parent at the same offset,
 and per-phase timings (lock, map, copy with read/hash/write split, complete,
@@ -81,20 +102,25 @@ was left in an unexpected driver state (details on stderr).
 include/gpuckpt.h        public API: repo, image, snapshot, manifest, cuda adapter
 src/objstore.c           object layer: local directory implementation + dispatch
 src/s3.c                 S3 implementation: libcurl transport, SigV4 signing, retries
+src/hostmem.c            staging arena: THP / hugetlb / mlock / CUDA pinning, prepared ahead
+src/kernels/             SHA-256 chunk kernel (NVRTC at runtime; also compiles as C for tests)
 src/store.c              content-addressed chunk store (write-once over the object layer)
 src/manifest.c           self-checked text manifests
 src/snapshot.c           chunk-parallel create / restore / verify / gc, repo locking
 src/image_file.c         host-file image backend
-src/cuda_backend.c       CUDA checkpoint adapter (dlopen'ed libcuda, custom storage)
+src/cuda_backend.c       CUDA checkpoint adapter: custom storage, async streams, pinning,
+                         device hashing, GPUDirect Storage (libcuda/nvrtc/cufile dlopen'ed)
 src/cli.c                command-line front end
 tests/run.sh             test suite
-tests/mock/              documentation-derived cuda.h, a mock libcuda, a mock S3 endpoint
-                         that verifies every request's SigV4 signature
+tests/mock/              documentation-derived cuda.h and cufile.h; mock libcuda (runs the
+                         kernel as C, counts every byte copied), mock NVRTC, mock cuFile,
+                         and a mock S3 endpoint that verifies every SigV4 signature
 bench/bench.sh           storage-layer benchmark
 scripts/criu-*.sh        EXPERIMENTAL CRIU orchestration (gate 3, unverified)
 docs/design.md           data model, control flow, failure policy, build modes
 docs/gates.md            hardware questions still open, and what the code assumes
 docs/s3.md               S3 backend: configuration, write-once semantics, gc grace
+docs/performance.md      data-path options, where the bytes go, what is unmeasured
 ```
 
 ## Design in brief
@@ -155,9 +181,13 @@ expectation is untested.
 
 - No run against a real driver, GPU, or CRIU install. Gates 1 to 6 in
   `docs/gates.md` are open.
-- GPUDirect Storage, application dirty tracking, retention policies beyond
-  `forget` + `gc` (plan step 6). Remote storage is covered by the S3
-  backend; replication between stores is `aws s3 sync`.
+- Application dirty tracking and retention policies beyond `forget` + `gc`
+  (plan step 6). Remote storage is covered by the S3 backend, and
+  replication between stores is `aws s3 sync`. GPUDirect Storage is
+  implemented but unverified on hardware (gate 4).
+- No performance claim for pinning, pipelining, device hashing or GDS. They
+  are implemented and tested for correctness only. See
+  docs/performance.md.
 - S3 credentials come only from environment variables; no instance
   profile, SSO or multipart upload.
 - Multi-GPU behaviour of the custom-storage mapping is modelled only by the
