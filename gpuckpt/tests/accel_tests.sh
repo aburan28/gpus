@@ -35,7 +35,14 @@ if [ "$thp_mode" = never ]; then
     rep "$T/hm_thp.out" '' hostmem | grep -q "THP disabled" && ok "THP disabled system-wide is reported" || bad "THP=never not reported"
 elif [ "${huge:-0}" -gt 0 ]; then ok "THP backing obtained: ${huge} kB huge pages (THP mode: $thp_mode)"
 else echo "  note THP requested but 0 kB obtained (mode: $thp_mode); reported, not an error"; fi
-[ "$(stat_of $T/hm_malloc.out hostmem_huge_kb)" = "0" ] && ok "malloc arena reports 0 kB huge pages" || bad "malloc huge kb"
+# --hostmem malloc makes no huge-page request; with THP "always" the kernel may
+# still back it with huge pages, and the report must say what it measured.
+mk=$(stat_of $T/hm_malloc.out hostmem_huge_kb)
+if [ "$thp_mode" = always ]; then
+    rep "$T/hm_malloc.out" '' hostmem | grep -q "^malloc: ${mk} of " && ok "malloc arena under THP=always: report matches the measured ${mk} kB" || bad "malloc report: $(rep $T/hm_malloc.out '' hostmem)"
+else
+    [ "$mk" = "0" ] && ok "malloc arena reports 0 kB huge pages (THP mode: $thp_mode)" || bad "malloc huge kb=$mk with THP mode $thp_mode"
+fi
 $BIN snapshot-file --repo "$T/hm" --input "$T/dev1.orig" --id hm-mlock --mlock > "$T/hm_ml.out" 2>&1 || bad "snapshot --mlock"
 case "$(rep $T/hm_ml.out '' mlock)" in locked*|failed:*RLIMIT_MEMLOCK*) ok "--mlock: $(rep $T/hm_ml.out '' mlock)";; *) bad "mlock report: $(rep $T/hm_ml.out '' mlock)";; esac
 $BIN snapshot-file --repo "$T/hm" --input "$T/dev1.orig" --id hm-pin --pin alloc > "$T/hm_pin.out" 2>&1 || bad "snapshot --pin alloc"

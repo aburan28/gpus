@@ -46,7 +46,9 @@ before the checkpoint rather than inside it.
   `sysctl vm.nr_hugepages=N`. Falls back to `thp` and says why.
 - `hugetlb1g`: 1 GiB pages. Needs `hugepagesz=1G hugepages=N` on the kernel
   command line. Falls back to 2 MiB, then `thp`.
-- `malloc`: page-aligned heap memory, no huge pages.
+- `malloc`: page-aligned heap memory with no huge-page request. Under
+  THP `always` the kernel may still back it with huge pages; the report
+  shows what was measured.
 
 Huge pages cut the number of page-table and IOMMU entries the DMA engine
 walks, and make pinning cheaper.
